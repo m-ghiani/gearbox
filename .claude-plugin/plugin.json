@@ -1,0 +1,41 @@
+{
+  "name": "gearbox",
+  "version": "0.3.0",
+  "description": "Picks model and effort for each subagent with Laya, a local decision model, and shows every subagent in a pane with its model, effort, tokens and files. Observes by default (logs its pick and how the agent ended, /gearbox report sums it up); in apply mode it starts subagents on the model it picks",
+  "author": {
+    "name": "Massimo Ghiani",
+    "email": "m.ghiani@gmail.com"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "ollama": {
+      "type": "string",
+      "title": "Ollama executable",
+      "description": "Path to the ollama executable. A desktop app may not see your shell's PATH: give the full path then, for example /opt/homebrew/bin/ollama.",
+      "default": "ollama"
+    },
+    "model": {
+      "type": "string",
+      "title": "Laya model",
+      "description": "The name of the Laya model in Ollama.",
+      "default": "laya"
+    },
+    "mode": {
+      "type": "string",
+      "title": "Mode",
+      "description": "observe: log what gearbox would pick and change nothing. apply: start each subagent on the model gearbox picks, unless the caller named one. The effort is only recommended either way.",
+      "default": "observe",
+      "options": [
+        "observe",
+        "apply"
+      ]
+    },
+    "retentionDays": {
+      "type": "number",
+      "title": "Keep logs (days)",
+      "description": "Logs of other sessions older than this are removed at the start of a session. 0 keeps them all.",
+      "default": 30
+    }
+  },
+  "license": "MIT"
+}

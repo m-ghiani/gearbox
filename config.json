@@ -1,0 +1,60 @@
+{
+  "models": ["haiku", "sonnet", "opus"],
+  "laya": {
+    "briefChars": 1000,
+    "timeoutMs": 10000
+  },
+  "work": {
+    "ask": "What kind of work does this task ask for?",
+    "options": [
+      { "id": "search", "description": "Search, read or list files without changing them" },
+      { "id": "review", "description": "Review existing code" },
+      { "id": "implement", "description": "Write or change code" },
+      { "id": "diagnose", "description": "Find the cause of a defect" },
+      { "id": "architecture", "description": "Design or architecture decision" }
+    ]
+  },
+  "difficulty": {
+    "ask": "How hard is this task for a capable software engineer?",
+    "levels": ["Trivial", "Routine", "Hard", "Very hard"]
+  },
+  "risk": {
+    "ask": "Would a mistake in this task be costly: production, security, data loss or concurrency?"
+  },
+  "table": {
+    "search": ["haiku:low", "haiku:medium", "sonnet:medium", "sonnet:high"],
+    "review": ["sonnet:medium", "sonnet:high", "opus:medium", "opus:high"],
+    "implement": ["sonnet:medium", "sonnet:high", "opus:medium", "opus:high"],
+    "diagnose": ["sonnet:high", "opus:medium", "opus:high", "opus:xhigh"],
+    "architecture": ["opus:medium", "opus:high", "opus:high", "opus:xhigh"]
+  },
+  "tieMargin": 0.15,
+  "fallback": {
+    "work": "implement",
+    "difficulty": 1
+  },
+  "signals": {
+    "multiCrate": {
+      "pattern": "crates/([\\w-]+)(?![\\w-])[\\s\\S]*crates/(?!\\1(?![\\w-]))[\\w-]+|\\b(multi-crate|across (both|several|multiple|all) crates|workspace members)\\b",
+      "flags": "i"
+    },
+    "unsafe": { "pattern": "\\bunsafe\\b" },
+    "concurrency": { "pattern": "\\b(async|tokio|deadlock|race condition|mutex|concurren\\w*|thread-safe)\\b", "flags": "i" },
+    "security": { "pattern": "\\b(auth\\w*|oauth|jwt|secret|crypto\\w*|permission\\w*|vulnerab\\w*)\\b", "flags": "i" },
+    "data": { "pattern": "\\b(migration\\w*|schema|database|production data|drop table)\\b", "flags": "i" }
+  },
+  "floors": [
+    {
+      "name": "costly mistake",
+      "when": ["unsafe", "concurrency", "security", "data"],
+      "layaRisk": 0.5,
+      "atLeast": "opus:medium"
+    },
+    {
+      "name": "several crates",
+      "when": ["multiCrate"],
+      "exceptWork": ["search"],
+      "atLeast": "opus:high"
+    }
+  ]
+}
