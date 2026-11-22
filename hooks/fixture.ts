@@ -37,4 +37,9 @@ export const CONFIG_JSON = {
     { name: 'costly mistake', when: ['unsafe', 'concurrency', 'security', 'data'], layaRisk: 0.5, atLeast: 'opus:medium' },
     { name: 'several crates', when: ['multiCrate'], exceptWork: ['search'], atLeast: 'opus:high' },
   ],
+  prices: {
+    haiku: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+    sonnet: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+    opus: { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
+  },
 }

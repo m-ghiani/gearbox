@@ -1,7 +1,7 @@
 // What the agents pane draws from: one row per subagent and the files each one touched.
 // This file holds no I/O, so the rows and the tree can be tested on their own.
 
-import type { AgentRow, FileOp, FileTouch } from '../types'
+import type { AgentRow, FileOp, FileTouch, Usage } from '../types'
 
 // The pane keeps this many agents; the oldest finished ones leave first.
 export const MAX_AGENTS = 30
@@ -167,4 +167,33 @@ export function parseGitStatus(out: string): Map<string, string> {
 // that was already modified and is modified again shows no change: git cannot tell.
 export function gitChanges(before: ReadonlyMap<string, string>, after: ReadonlyMap<string, string>): string[] {
   return [...after.entries()].filter(([path, xy]) => before.get(path) !== xy).map(([path]) => path)
+}
+
+export const NO_USAGE: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+
+export function addUsage(a: Usage, b: Usage): Usage {
+  return { input: a.input + b.input, output: a.output + b.output, cacheRead: a.cacheRead + b.cacheRead, cacheWrite: a.cacheWrite + b.cacheWrite }
+}
+
+// "1.234" → "$1.23"; under a dollar two significant digits: "0.0042" → "$0.0042".
+export function shortDollars(n: number): string {
+  return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toPrecision(2).replace(/0+$/, '').replace(/\.$/, '')}`
+}
+
+// The status line's entry: what runs and what finished; undefined clears it.
+export function statusText(rows: readonly AgentRow[]): string | undefined {
+  if (rows.length === 0) {
+    return undefined
+  }
+  const running = rows.filter(r => r.status === 'running').length
+  return `⚙ ${running} running · ${rows.length - running} finished`
+}
+
+// The finished agents that ended more than `minutes` ago; none when minutes is 0.
+export function expiredAgents(rows: readonly AgentRow[], now: number, minutes: number): string[] {
+  if (minutes <= 0) {
+    return []
+  }
+  const cutoff = now - minutes * 60_000
+  return rows.filter(r => r.status !== 'running' && r.startedAt + (r.durationMs ?? 0) <= cutoff).map(r => r.id)
 }

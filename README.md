@@ -5,7 +5,7 @@ A Claude Code mod that picks the model and effort for each subagent with [Laya](
 For each subagent it asks Laya what the work is, turns the answers into a model and an effort, and logs that next to what the subagent actually ran on and how it ended. It has two modes:
 
 - **observe** (the default) changes nothing. The subagent starts at once and Laya is asked while it runs. The logs are the evaluation set that `/gearbox report` reads, to tune `config.json` before applying anything.
-- **apply** starts each subagent on the model gearbox picked, unless the caller named one. A spawn takes no effort, so the effort is only recommended, in the pane and the log. The subagent waits for Laya (up to `laya.timeoutMs`) before it starts.
+- **apply** starts each subagent on the model gearbox picked, unless the caller named one, and runs each of its steps at the effort gearbox picked, from the first step on, so the subagent's cache is never broken by a change. A subagent whose model the caller named keeps the effort it would have had, and so does a model without effort levels. The subagent waits for Laya (up to `laya.timeoutMs`) before it starts, unless Laya has answered the same brief before in the session.
 
 ## Requirements
 
@@ -66,6 +66,8 @@ In `/config`, under the mod's name:
 | Laya model | `laya` | the model's name in Ollama, as `ollama list` shows it |
 | Mode | `observe` | `observe` changes nothing; `apply` starts subagents on the model gearbox picks (see above) |
 | Keep logs (days) | `30` | logs of other sessions older than this are removed when a session starts; `0` keeps them all |
+| Notify when an agent ends | `on` | a notice says when a subagent finishes, how it ended and how long it ran; `off` leaves it to the pane |
+| Clear finished agents after (minutes) | `0` | a finished subagent leaves the pane this many minutes after it ends; `0` keeps it until `clear` or `/clear` |
 
 From the command line: `claude plugin configure gearbox@gearbox`, or `echo '{"mode":"apply"}' | claude plugin configure gearbox@gearbox --values-stdin`. A change applies from the next session.
 
@@ -86,8 +88,13 @@ The questions, the table and the floors are in `config.json`, beside this README
 | `fallback` | the work and difficulty level assumed when Laya does not answer |
 | `signals` | regular expressions run on the whole brief (`pattern`, optional `flags`) |
 | `floors` | minimum gears: `when` lists signals that trigger it, `layaRisk` the probability of "costly" that triggers it too, `exceptWork` the kinds of work it skips, `atLeast` the gear |
+| `prices` | optional: dollars per million tokens for each model of `models` (`input`, `output`, `cacheRead`, `cacheWrite`), for the pane's and the report's cost estimates. A model without a price has no estimate |
 
-Efforts are `low`, `medium`, `high`, `xhigh`, `max`. Some examples:
+Efforts are `low`, `medium`, `high`, `xhigh`, `max`. gearbox picks at most `high` on its own: a gear of `table` or `floors` above it is lowered to `high`. `xhigh` and `max` are yours to ask for: when your latest prompt says `xhigh` (or `x-high`, `extra high`), or `max effort` (or `sforzo massimo`), every subagent it starts is picked at that effort, on the model the table and floors give. The next prompt that does not ask goes back to `high` at most. A prompt that merely mentions `xhigh` counts as asking: where that matters, `/gearbox effort xhigh` (or `max`) sets the effort for every subagent of the session, whatever the prompts say, until `/gearbox effort auto`.
+
+The shipped `prices` are Anthropic's API list prices for Haiku 5.5, Sonnet 5.5 and Opus 5.5 as of October 2026; `cacheWrite` is taken as 1.25× `input` (the 5-minute cache) and Haiku's `cacheRead` as 0.1× `input`. They are estimates: a subscription, a cloud provider's prices or another model version cost differently, so set your own where they differ.
+
+Some examples:
 
 - **Cheaper reviews**: change `table.review` to `["haiku:medium", "sonnet:medium", "sonnet:high", "opus:medium"]`.
 - **A new signal**: add `"payments": { "pattern": "\\b(stripe|invoice|refund)\\b", "flags": "i" }` to `signals`, then add `"payments"` to the `when` list of the `costly mistake` floor.
@@ -95,18 +102,35 @@ Efforts are `low`, `medium`, `high`, `xhigh`, `max`. Some examples:
 
 The file is checked whole when it is read. If anything is wrong (a model not in `models`, a row without one gear per level, a regular expression that does not compile), gearbox turns itself off for the session, says so in a notice, and `/gearbox` names the field. Subagents start untouched.
 
+### A project's own policy: .claude/gearbox.json
+
+A project can tune the policy for itself in `.claude/gearbox.json`, in the directory the session starts in. It holds any fields of `config.json`: `table`, `signals` and `prices` are merged entry by entry over the shipped ones, any other field replaces the shipped one. For a Rust workspace, for example:
+
+```json
+{
+  "table": { "review": ["sonnet:medium", "sonnet:high", "opus:medium", "opus:high"] },
+  "signals": { "ffi": { "pattern": "\\b(ffi|extern \"C\")\\b" } },
+  "floors": [{ "name": "ffi", "when": ["ffi"], "atLeast": "opus:medium" }]
+}
+```
+
+The result is checked whole, like `config.json` alone: if it is wrong, gearbox is off for the session and `/gearbox` names the field and the file. When a project policy is in use, a notice says so at the start of the session and `/gearbox` names it: a repository you clone can change what your subagents run on, and its regular expressions run on every brief.
+
 ## Use
 
 | | |
 | --- | --- |
 | `/gearbox` | state and mode, the policy file, the Laya command and where this session's logs are; if config.json is invalid, why |
 | `/gearbox off` / `on` | stops or resumes assessing in this session |
+| `/gearbox effort xhigh` / `max` / `auto` | sets an effort above `high` for every subagent of the session, or lets gearbox pick again (at most `high`, unless a prompt asks) |
 | `/gearbox agents` | opens the agents pane |
 | `/gearbox report` | what the logs of all sessions say (`/gearbox report session`: this session only) |
 
 Forks, resumed agents and workflow agents are not assessed.
 
-At the start of a session gearbox asks Laya once with a brief of no consequence, so the model is loaded in Ollama before the first real subagent; it also removes logs older than **Keep logs**. Neither holds the session up.
+At the start of a session gearbox asks Laya once with a brief of no consequence, so the model is loaded in Ollama before the first real subagent; it also removes logs older than **Keep logs**. Neither holds the session up. Laya's answers are kept for the session (the last 100 briefs): a subagent with the same type, description and brief as an earlier one is not asked again, and its spawn line says `"cached": true`.
+
+While subagents exist, the status line shows `⚙ 1 running · 2 finished`.
 
 ### The report
 
@@ -114,38 +138,42 @@ At the start of a session gearbox asks Laya once with a brief of no consequence,
 
 - **Model** and **Effort**: how often gearbox's pick agrees with what ran, and how often it would have gone higher or lower.
 - **How they ended**, grouped by what gearbox would have done with the model: how many answered (rather than being stopped or failing) and the tokens they used.
-- **Room to save**: agents that answered on a model above gearbox's pick, with their tokens; **Too low?**: agents that did not answer on a model below it.
+- **Room to save**: agents that answered on a model above gearbox's pick, with their tokens and, where `prices` covers both models, what they cost against what the same tokens would cost on gearbox's picks; **Too low?**: agents that did not answer on a model below it.
+- **Estimated spend**: what the ended agents cost at the `prices` of `config.json`, and on gearbox's picks. The same tokens are priced on both sides, so it is an estimate: another model would not have used exactly the same tokens. Logs written before 0.4 hold no usage and are left out of it.
 - **By kind of work**: how many of each, and how often gearbox agrees on the model.
 
 Read it before switching to `apply`: a high agreement with many answered agents says the table is right; many "Too low?" say a row of `table` or a floor should go up.
 
 ### The agents pane
 
-The pane opens at the start of a session, docked beside the transcript in the fullscreen terminal when it is wide enough (otherwise `/gearbox agents`). It lists every subagent of the session, running ones first, then finished ones, newest first:
+The pane opens at the start of a session, docked beside the transcript in the fullscreen terminal when it is wide enough (otherwise `/gearbox agents`). It lists every subagent of the session in two groups: **RUNNING**, each agent framed, in the order they started; and **FINISHED**, folded to two lines, newest first. An agent moves from the first group to the second the moment it ends.
 
 ```
-1 running · 1 finished
+ RUNNING · 1
+╭──────────────────────────────────────────╮
+│ ● Fix the parser                       ↗ │
+│   sonnet 5.5 · medium · rust-engineer    │
+│   48.2k tokens · ≈ $0.21 · 1m 12s        │
+│   ⚙ gearbox → opus:medium                │
+│   ├─ src/                                │
+│   │  └─ M parse.rs ×2                    │
+│   └─ R Cargo.toml                        │
+╰──────────────────────────────────────────╯
 
-● Fix the parser                              ↗
-  sonnet 5.5 · medium · rust-engineer
-  48.2k tokens · 1m 12s
-  gearbox → opus:medium
-  ├─ src/
-  │  └─ M parse.rs ×2
-  ├─ target/
-  │  └─ B report.txt
-  └─ R Cargo.toml
+ FINISHED · 2                         clear
+ ✓ Find the config loader      done · 14s ↗
+   haiku 5.5 · low · 9.1k tokens · ≈ $0.001
 
-✓ Find the config loader                      ↗
-  haiku 4.5 · low · Explore
-  9.1k tokens · 14s
+ ✗ Run the test suite        failed · 41s ↗
+   sonnet 5.5 · medium · 22.0k tokens · ≈ $0.07
 ```
 
-- **The status**: `●` running, `✓` done, `■` stopped, `✗` failed.
+- **The status**: `●` running; a finished agent says how it ended, in words and colour: `✓ done` (green), `■ stopped` (yellow), `✗ failed` (red), with how long it ran.
+- **`clear`**: removes the finished agents, and their files, from the pane. The logs keep them.
 - **`↗`**: opens the agent's transcript in the main view, as the tasks list does.
 - **The second line**: the model and the effort the subagent really runs on, and its type.
-- **The third line**: the tokens of all its requests (input, output and cache), and how long it has run, or ran. The cost of a single agent is not available to a mod.
-- **`gearbox →`** (in `apply` mode `gearbox ✓`): what gearbox picked, in yellow when it differs from what runs. Absent for forks, resumes, workflow agents and while `/gearbox off`; observing, it appears a moment after the agent, once Laya has answered.
+- **The third line**: the tokens of all its requests (input, output and cache), what they cost by the `prices` of `config.json` (`≈ $0.42`, absent for a model without a price), and how long it has run, counted each second, or ran.
+- **`⚙ gearbox →`** (in `apply` mode `⚙ gearbox ✓`): what gearbox picked, in bold yellow when it differs from what runs; on a finished agent it shows only when it differs. Absent for forks, resumes, workflow agents and while `/gearbox off`; observing, it appears a moment after the agent, once Laya has answered.
 - **The files**: point at an agent to see them, or select it (a click, or ctrl+x tab to focus the pane, then Enter) to keep them open; select it again to close them. `M` edited, `W` written, `B` changed by a Bash command, `R` read, `×n` how many times. Paths under the agent's directory are shown relative to it.
 
 Read, Edit, MultiEdit, Write and NotebookEdit name their file. A Bash command does not: gearbox runs `git status` in the agent's directory before and after it, and credits the command with the files whose status changed. So a file outside a git repository, an ignored file (`target/` in most Rust projects), or a file that was already modified and is modified again is not shown; and a file another agent changes while the command runs is credited to it too.

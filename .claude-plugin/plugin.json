@@ -1,7 +1,7 @@
 {
   "name": "gearbox",
-  "version": "0.3.0",
-  "description": "Picks model and effort for each subagent with Laya, a local decision model, and shows every subagent in a pane with its model, effort, tokens and files. Observes by default (logs its pick and how the agent ended, /gearbox report sums it up); in apply mode it starts subagents on the model it picks",
+  "version": "0.4.0",
+  "description": "Picks model and effort for each subagent with Laya, a local decision model, and shows every subagent in a pane with its model, effort, tokens, estimated cost and files. Observes by default (logs its pick and how the agent ended, /gearbox report sums it up); in apply mode it starts subagents on the model and effort it picks",
   "author": {
     "name": "Massimo Ghiani",
     "email": "m.ghiani@gmail.com"
@@ -23,7 +23,7 @@
     "mode": {
       "type": "string",
       "title": "Mode",
-      "description": "observe: log what gearbox would pick and change nothing. apply: start each subagent on the model gearbox picks, unless the caller named one. The effort is only recommended either way.",
+      "description": "observe: log what gearbox would pick and change nothing. apply: start each subagent on the model gearbox picks, unless the caller named one, and run it at the effort gearbox picks.",
       "default": "observe",
       "options": [
         "observe",
@@ -35,6 +35,22 @@
       "title": "Keep logs (days)",
       "description": "Logs of other sessions older than this are removed at the start of a session. 0 keeps them all.",
       "default": 30
+    },
+    "notify": {
+      "type": "string",
+      "title": "Notify when an agent ends",
+      "description": "on: a notice says when a subagent finishes, how it ended and how long it ran. off: the pane alone shows it.",
+      "default": "on",
+      "options": [
+        "on",
+        "off"
+      ]
+    },
+    "clearAfterMinutes": {
+      "type": "number",
+      "title": "Clear finished agents after (minutes)",
+      "description": "A finished subagent leaves the pane this many minutes after it ends. 0 keeps it until clear or /clear.",
+      "default": 0
     }
   },
   "license": "MIT"

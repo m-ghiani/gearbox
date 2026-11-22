@@ -1,8 +1,10 @@
 // /gearbox report: what the logs say about gearbox's picks against what the subagents ran on
 // and how they ended. This file holds no I/O, so the summary can be tested on its own.
 
-import { shortCount } from './agents'
-import { EFFORTS } from './policy'
+import { shortCount, shortDollars } from './agents'
+import { costOf, EFFORTS } from './policy'
+import type { Price } from './policy'
+import type { Usage } from '../types'
 
 type Joined = {
   recommended: string
@@ -12,6 +14,7 @@ type Joined = {
   hasLaya: boolean
   reason?: string
   tokens?: number
+  usage?: Usage
 }
 
 type Direction = 'same' | 'higher' | 'lower' | 'unknown'
@@ -22,6 +25,14 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v : ''
+}
+
+function usageOf(v: unknown): Usage | undefined {
+  if (!isRecord(v)) {
+    return undefined
+  }
+  const n = (k: string) => (typeof v[k] === 'number' && Number.isFinite(v[k]) ? (v[k] as number) : 0)
+  return { input: n('input'), output: n('output'), cacheRead: n('cacheRead'), cacheWrite: n('cacheWrite') }
 }
 
 // One agent's spawn, step and end lines, joined by agentId. A spawn with no agent (refused)
@@ -54,6 +65,10 @@ export function join(lines: readonly unknown[]): Joined[] {
       if (typeof line.tokens === 'number') {
         one.tokens = line.tokens
       }
+      const usage = usageOf(line.usage)
+      if (usage) {
+        one.usage = usage
+      }
     }
   }
   return [...byAgent.values()]
@@ -66,6 +81,7 @@ export function join(lines: readonly unknown[]): Joined[] {
       hasLaya: j.hasLaya ?? false,
       ...(j.reason !== undefined ? { reason: j.reason } : {}),
       ...(j.tokens !== undefined ? { tokens: j.tokens } : {}),
+      ...(j.usage !== undefined ? { usage: j.usage } : {}),
     }))
 }
 
@@ -102,7 +118,25 @@ function count<T>(items: readonly T[], key: (x: T) => string): Map<string, numbe
   return out
 }
 
-export function summarize(lines: readonly unknown[], models: readonly string[], scope: string): string {
+// The dollars a group spent, and what the same tokens would cost on gearbox's picks; null
+// where no agent of the group has both prices (a log of 0.3, or a model without a price).
+function dollars(group: readonly Joined[], models: readonly string[], prices: Record<string, Price>): { spent: number; onPick: number } | null {
+  let spent = 0
+  let onPick = 0
+  let priced = 0
+  for (const j of group) {
+    const ran = j.usage ? costOf({ models, prices }, j.ranOn, j.usage) : null
+    const pick = j.usage ? costOf({ models, prices }, j.recommended.split(':')[0] ?? '', j.usage) : null
+    if (ran !== null && pick !== null) {
+      spent += ran
+      onPick += pick
+      priced++
+    }
+  }
+  return priced === 0 ? null : { spent, onPick }
+}
+
+export function summarize(lines: readonly unknown[], models: readonly string[], scope: string, prices: Record<string, Price> = {}): string {
   const all = join(lines)
   if (all.length === 0) {
     return `gearbox report (${scope}): no assessed subagents in the logs yet.`
@@ -132,11 +166,17 @@ export function summarize(lines: readonly unknown[], models: readonly string[], 
   }
   const cheaper = ended.filter(j => j.model === 'lower' && j.reason === 'answer')
   if (cheaper.length > 0) {
-    out.push(`  Room to save: ${cheaper.length} agents answered on a model above gearbox's pick, using ${shortCount(cheaper.reduce((n, j) => n + (j.tokens ?? 0), 0))} tokens.`)
+    const d = dollars(cheaper, models, prices)
+    const cost = d ? ` ≈ ${shortDollars(d.spent)}; the same tokens on gearbox's picks ≈ ${shortDollars(d.onPick)}` : ''
+    out.push(`  Room to save: ${cheaper.length} agents answered on a model above gearbox's pick, using ${shortCount(cheaper.reduce((n, j) => n + (j.tokens ?? 0), 0))} tokens${cost}.`)
   }
   const failedLow = ended.filter(j => j.model === 'higher' && j.reason !== 'answer')
   if (failedLow.length > 0) {
     out.push(`  Too low?: ${failedLow.length} agents did not answer on a model below gearbox's pick.`)
+  }
+  const total = dollars(ended, models, prices)
+  if (total) {
+    out.push(`  Estimated spend: ≈ ${shortDollars(total.spent)} at list prices; on gearbox's picks ≈ ${shortDollars(total.onPick)}.`)
   }
   out.push('')
 

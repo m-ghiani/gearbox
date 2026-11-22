@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { choose, layaArgv, layaState, parseConfig, parseLaya, signalsOf, upOnTie } from './policy'
+import { askedEffort, choose, costOf, layaArgv, mergeConfig, layaState, parseConfig, parseLaya, signalsOf, upOnTie } from './policy'
 import type { Config, LayaAnswers } from './policy'
 
 import { CONFIG_JSON } from './fixture'
@@ -31,7 +31,7 @@ const BRIEF =
   'The borrow checker fails in crates/engine and crates/net after moving the pool to Arc<Mutex<>>; ' +
   'intermittent deadlock under tokio. Find the cause and propose a fix across both crates.'
 
-type Options = { stdout?: string; fail?: boolean; configText?: string; gitStatus?: string[] }
+type Options = { stdout?: string; fail?: boolean; configText?: string; gitStatus?: string[]; project?: object | string }
 
 // Nothing sits below the mod: these hooks play the engine.
 function engine(on: On, options: Options = {}) {
@@ -43,16 +43,28 @@ function engine(on: On, options: Options = {}) {
     spawnedWith: [] as (string | undefined)[],
     // What happened first: the spawn or the question to Laya.
     order: [] as string[],
+    // The effort each step reached the engine with.
+    stepEfforts: [] as unknown[],
+    // Reads of a log file (config files aside).
+    logReads: 0,
   }
   const gitStatus = [...(options.gitStatus ?? [])]
   on('clock.now', () => ({ value: 0 }))
   on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/home/test' : undefined }))
   on('session.id', () => ({ value: 'test-session' }))
   on('session.cwd', () => ({ value: '/project' }))
-  on('fs.exists', () => ({ value: seen.log !== '' }))
-  on('fs.read', (_, e) => ({
-    value: (String(e.path).endsWith('config.json') ? (options.configText ?? JSON.stringify(CONFIG_JSON)) : seen.log) as never,
-  }))
+  on('fs.exists', (_, e) => ({ value: String(e.path).endsWith('.claude/gearbox.json') ? options.project !== undefined : seen.log !== '' }))
+  on('fs.read', (_, e) => {
+    const path = String(e.path)
+    if (path.endsWith('.claude/gearbox.json')) {
+      return { value: (typeof options.project === 'string' ? options.project : JSON.stringify(options.project)) as never }
+    }
+    if (path.endsWith('config.json')) {
+      return { value: (options.configText ?? JSON.stringify(CONFIG_JSON)) as never }
+    }
+    seen.logReads++
+    return { value: seen.log as never }
+  })
   on('fs.write', (_, e) => {
     seen.path = e.path
     seen.log = e.text
@@ -63,6 +75,7 @@ function engine(on: On, options: Options = {}) {
     seen.toasts.push(String(e.text))
     return { value: undefined }
   })
+  on('ui.status', () => ({ value: undefined }))
   on('process.run', (_, e) => {
     if (e.argv[0] === 'git') {
       // rev-parse answers the root; each status answers the next of options.gitStatus.
@@ -82,11 +95,13 @@ function engine(on: On, options: Options = {}) {
     return { model: e.model ?? e.parentModel, agentId: 'agent-1' }
   })
   on('turn.step', async function* (_, e) {
+    seen.stepEfforts.push(e.effort)
     const usage = { model: e.model, input_tokens: 1000, output_tokens: 200, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage }
   })
   on('turn.complete', () => ({ text: '' }) as never)
   on('tool.call', () => ({ result: {} }))
+  on('prompt.submit', (_, e) => ({ text: e.text }) as never)
   return seen
 }
 
@@ -146,6 +161,25 @@ test('searching is cheap, diagnosing is not', () => {
   expect(choose(config(), answers({ diagnose: 0.9 }, [0, 0.1, 0.8, 0.1]), QUIET).gear).toEqual({ model: 'opus', effort: 'high' })
 })
 
+test('an effort above high is picked only when the user asks for it', () => {
+  const veryHard = answers({ diagnose: 0.9 }, [0, 0, 0.1, 0.9])
+  // The table says opus:xhigh: unasked, it stops at high.
+  const unasked = choose(config(), veryHard, QUIET)
+  expect(unasked.gear).toEqual({ model: 'opus', effort: 'high' })
+  expect(unasked.why).toContain('high: higher efforts only when the user asks')
+  expect(choose(config(), veryHard, QUIET, 'xhigh').gear).toEqual({ model: 'opus', effort: 'xhigh' })
+  // Asked for, it holds whatever the table says.
+  const search = choose(config(), answers({ search: 0.9 }, [0.9, 0.1, 0, 0]), QUIET, 'xhigh')
+  expect(search.gear).toEqual({ model: 'haiku', effort: 'xhigh' })
+  expect(search.why).toContain('xhigh: asked for by the user')
+
+  expect(askedEffort('Fix it, use xhigh effort')).toBe('xhigh')
+  expect(askedEffort('run it at X-High')).toBe('xhigh')
+  expect(askedEffort('max effort on this one')).toBe('max')
+  expect(askedEffort('usa lo sforzo massimo')).toBe('max')
+  expect(askedEffort('find the max value in the high scores')).toBe(null)
+})
+
 test('code-writing work never goes below Sonnet', () => {
   expect(choose(config(), answers({ implement: 0.9 }, [0.9, 0.1, 0, 0]), QUIET).gear.model).toBe('sonnet')
 })
@@ -202,6 +236,18 @@ test('observing, the subagent runs on what it asked for, and the choice is logge
   })
   expect(line.laya.work.diagnose).toBe(0.399)
   expect(seen.path).toBe('/home/test/.claude/mods/gearbox/test-session/agent-1.jsonl')
+})
+
+test('an effort above high is picked only for the prompt that asked for it', async ($, on) => {
+  const seen = engine(on)
+  await $.prompt.submit({ text: 'Fix the deadlock, use xhigh' } as never)
+  await spawn($)
+  expect(lines(seen.log)[0]).toMatchObject({ recommended: 'opus:xhigh' })
+
+  await $.prompt.submit({ text: 'Now fix the next one' } as never)
+  await spawn($)
+  // The same agent id: its second spawn line follows the first.
+  expect(lines(seen.log).at(-1)).toMatchObject({ recommended: 'opus:high' })
 })
 
 test('the brief reaches Laya on stdin, never in the command line', async ($, on) => {
@@ -322,4 +368,101 @@ test('after the start, Laya is warmed up and only stale logs of other sessions a
 
   expect(runs.some(argv => argv[1] === 'run' && argv[2] === 'laya')).toBe(true)
   expect(runs.filter(argv => argv[0] === 'rm')).toEqual([['rm', '-rf', '--', '/home/test/.claude/mods/gearbox/old-session']])
+})
+
+// The ten additions of 0.4
+
+test('a project policy is merged over config.json, and a broken one turns gearbox off', async ($, on) => {
+  const merged = mergeConfig(CONFIG_JSON, { table: { search: ['sonnet:low', 'sonnet:low', 'sonnet:low', 'sonnet:low'] }, tieMargin: 0.3 }) as typeof CONFIG_JSON
+  expect(merged.table.search).toEqual(['sonnet:low', 'sonnet:low', 'sonnet:low', 'sonnet:low'])
+  expect(merged.table.review).toEqual(CONFIG_JSON.table.review)
+  expect(merged.tieMargin).toBe(0.3)
+
+  const seen = engine(on, { project: { floors: [{ name: 'all opus', when: ['concurrency'], atLeast: 'opus:medium' }], table: { diagnose: ['haiku:low', 'haiku:low', 'haiku:low', 'haiku:low'] } } })
+  await spawn($)
+  // Diagnose, Hard → haiku:low by the project's table; its only floor raises it to opus:medium.
+  expect(lines(seen.log)[0]).toMatchObject({ recommended: 'opus:medium' })
+  expect(seen.toasts.some(t => t.includes('project policy .claude/gearbox.json'))).toBe(true)
+})
+
+test('a project policy that breaks the config is refused, naming it', async ($, on) => {
+  const seen = engine(on, { project: { table: { search: ['nope:low'] } } })
+  await spawn($)
+  expect(seen.log).toBe('')
+  const said = await $.command.run({ command: 'gearbox', args: '' } as never)
+  expect('text' in said ? said.text : '').toContain('/project/.claude/gearbox.json')
+})
+
+test('prices are checked and turn tokens into dollars', () => {
+  const c = config()
+  expect(Math.round((costOf(c, 'claude-sonnet-5-5', { input: 1000, output: 200, cacheRead: 0, cacheWrite: 0 }) ?? 0) * 1e6)).toBe(4000)
+  expect(costOf(c, 'gpt-x', { input: 1000, output: 0, cacheRead: 0, cacheWrite: 0 })).toBe(null)
+  expect(parseConfig({ ...CONFIG_JSON, prices: { gpt: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 } } }).error).toContain('"gpt" is not one of models')
+  expect(parseConfig({ ...CONFIG_JSON, prices: { opus: { input: 1, output: 1, cacheRead: 1 } } }).error).toContain('prices.opus.cacheWrite')
+  const { prices: _, ...withoutPrices } = CONFIG_JSON
+  expect(parseConfig(withoutPrices).config?.prices).toEqual({})
+})
+
+test('applying, each step runs at the effort gearbox picked', { options: { mode: 'apply' } }, async ($, on) => {
+  const seen = engine(on, { fail: true })
+  await spawn($)
+  for (const index of [0, 1]) {
+    for await (const _ of $.turn.step({ turnId: 't1', index, messageCount: 1, model: 'claude-opus-5-5', effort: 'medium', agentId: 'agent-1' })) {
+      // no chunks
+    }
+  }
+  // Rules only: two crates raise it to opus:high.
+  expect(seen.stepEfforts).toEqual(['high', 'high'])
+  expect(lines(seen.log)[1]).toMatchObject({ kind: 'step', effort: 'high', defaultEffort: 'medium' })
+})
+
+test('the effort is left alone when observing, or when the caller named the model', { options: { mode: 'apply' } }, async ($, on) => {
+  const seen = engine(on, { fail: true })
+  await spawn($, { model: 'haiku' })
+  for await (const _ of $.turn.step({ turnId: 't1', index: 0, messageCount: 1, model: 'claude-haiku-5-5', effort: 'medium', agentId: 'agent-1' })) {
+    // no chunks
+  }
+  expect(seen.stepEfforts).toEqual(['medium'])
+})
+
+test('observing, the effort a step asks for reaches the engine unchanged', async ($, on) => {
+  const seen = engine(on)
+  await spawn($)
+  for await (const _ of $.turn.step({ turnId: 't1', index: 0, messageCount: 1, model: 'claude-sonnet-5-5', effort: 'medium', agentId: 'agent-1' })) {
+    // no chunks
+  }
+  expect(seen.stepEfforts).toEqual(['medium'])
+})
+
+test('/gearbox effort sets an effort above high for the session, until auto', async ($, on) => {
+  const seen = engine(on)
+  await $.command.run({ command: 'gearbox', args: 'effort max' } as never)
+  await $.prompt.submit({ text: 'Fix it' } as never)
+  await spawn($)
+  expect(lines(seen.log).at(-1)).toMatchObject({ recommended: 'opus:max' })
+
+  await $.command.run({ command: 'gearbox', args: 'effort auto' } as never)
+  await spawn($)
+  expect(lines(seen.log).at(-1)).toMatchObject({ recommended: 'opus:high' })
+})
+
+test('a brief seen before is not asked of Laya again', async ($, on) => {
+  const seen = engine(on)
+  await spawn($)
+  await spawn($)
+  expect(seen.calls.length).toBe(1)
+  expect(lines(seen.log).at(-1)).toMatchObject({ cached: true, recommended: 'opus:high' })
+})
+
+test("an agent's log is written without reading it back, its usage and cost at the end", async ($, on) => {
+  const seen = engine(on)
+  await spawn($)
+  for await (const _ of $.turn.step({ turnId: 't1', index: 0, messageCount: 1, model: 'claude-sonnet-5-5', effort: 'medium', agentId: 'agent-1' })) {
+    // no chunks
+  }
+  await $.turn.complete({ turnId: 't1', agentId: 'agent-1', reason: 'answer', answer: 'ok', durationMs: 4200, isAborted: false } as never)
+  expect(seen.logReads).toBe(0)
+  const end = lines(seen.log).find(l => l.kind === 'end')
+  expect(end.usage).toEqual({ input: 1000, output: 200, cacheRead: 0, cacheWrite: 0 })
+  expect(Math.round(end.cost * 1e6)).toBe(4000)
 })

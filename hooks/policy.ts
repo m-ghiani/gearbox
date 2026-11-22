@@ -1,4 +1,4 @@
-import type { Effort } from '../types'
+import type { Effort, Usage } from '../types'
 
 // What gearbox decides with, read from config.json: the questions put to Laya, the table that
 // turns its answers into a model and an effort, and the floors that raise the result. This
@@ -19,6 +19,9 @@ export type Floor = {
   atLeast: Gear
 }
 
+// Dollars per million tokens, by kind of token.
+export type Price = { input: number; output: number; cacheRead: number; cacheWrite: number }
+
 export type Config = {
   // Weakest to strongest: a floor compares gears by this order, then by effort.
   models: string[]
@@ -33,6 +36,8 @@ export type Config = {
   fallback: { work: string; difficulty: number }
   signals: Record<string, RegExp>
   floors: Floor[]
+  // By model alias of `models`; a model without a price has no cost estimate.
+  prices: Record<string, Price>
 }
 
 type Parsed = { config: Config; error?: undefined } | { config?: undefined; error: string }
@@ -143,6 +148,16 @@ export function parseConfig(raw: unknown): Parsed {
       }
     })
 
+    const prices: Record<string, Price> = {}
+    for (const [model, p] of Object.entries(c.prices === undefined ? {} : record(c.prices, 'prices'))) {
+      if (!models.includes(model)) {
+        throw new ConfigError(`prices.${model}: "${model}" is not one of models (${models.join(', ')})`)
+      }
+      const r = record(p, `prices.${model}`)
+      const dollars = (k: string) => num(r[k], `prices.${model}.${k}`, 0, 10_000)
+      prices[model] = { input: dollars('input'), output: dollars('output'), cacheRead: dollars('cacheRead'), cacheWrite: dollars('cacheWrite') }
+    }
+
     const fallback = record(c.fallback, 'fallback')
     const fallbackWork = text(fallback.work, 'fallback.work')
     if (!ids.includes(fallbackWork)) {
@@ -164,6 +179,7 @@ export function parseConfig(raw: unknown): Parsed {
         fallback: { work: fallbackWork, difficulty: num(fallback.difficulty, 'fallback.difficulty', 0, levels.length - 1) },
         signals,
         floors,
+        prices,
       },
     }
   } catch (err) {
@@ -172,6 +188,38 @@ export function parseConfig(raw: unknown): Parsed {
     }
     throw err
   }
+}
+
+// A project's .claude/gearbox.json over config.json: `table`, `signals` and `prices` are merged
+// entry by entry, any other field it sets replaces the shipped one. The result is checked
+// whole by parseConfig, like config.json alone.
+const MERGED = ['table', 'signals', 'prices']
+
+export function mergeConfig(base: unknown, project: unknown): unknown {
+  if (!isRecord(base) || !isRecord(project)) {
+    return project === undefined ? base : project
+  }
+  const out: Record<string, unknown> = { ...base }
+  for (const [key, value] of Object.entries(project)) {
+    const was = base[key]
+    out[key] = MERGED.includes(key) && isRecord(was) && isRecord(value) ? { ...was, ...value } : value
+  }
+  return out
+}
+
+// The model alias of `models` a model id belongs to ("claude-opus-5-5" → "opus"), or null.
+export function familyOf(models: readonly string[], model: string): string | null {
+  return models.find(m => model === m || model.includes(m)) ?? null
+}
+
+// What the tokens cost on a model, in dollars; null when the model has no price.
+export function costOf(config: { models: readonly string[]; prices: Record<string, Price> }, model: string, u: Usage): number | null {
+  const family = familyOf(config.models, model)
+  const p = family ? config.prices[family] : undefined
+  if (!p) {
+    return null
+  }
+  return (u.input * p.input + u.output * p.output + u.cacheRead * p.cacheRead + u.cacheWrite * p.cacheWrite) / 1_000_000
 }
 
 export function signalsOf(config: Config, brief: string): Record<string, boolean> {
@@ -238,8 +286,25 @@ export function gearName(x: Gear): string {
 
 export type Pick = { gear: Gear; work: string; level: number; why: string[] }
 
-// Laya says what the work is; the table and the floors say what it runs on.
-export function choose(config: Config, answers: LayaAnswers | null, signals: Record<string, boolean>): Pick {
+// The highest effort gearbox picks on its own: the ones above cost far more and are the
+// person's call, so they come only from asking for them.
+export const MAX_UNASKED_EFFORT: Effort = 'high'
+
+const ASKED: { effort: Effort; pattern: RegExp }[] = [
+  { effort: 'max', pattern: /\b(max(imum)?\s+effort|effort\s*[:=]?\s*max(imum)?|sforzo\s+massimo)\b/i },
+  { effort: 'xhigh', pattern: /\b(x-?high|extra[- ]high)\b/i },
+]
+
+// The effort above MAX_UNASKED_EFFORT a prompt of the person's names, the highest first;
+// null when it names none.
+export function askedEffort(prompt: string): Effort | null {
+  return ASKED.find(a => a.pattern.test(prompt))?.effort ?? null
+}
+
+// Laya says what the work is; the table and the floors say what it runs on. An effort above
+// MAX_UNASKED_EFFORT is the person's to ask for: `asked` sets it, and without it the pick
+// stops at MAX_UNASKED_EFFORT.
+export function choose(config: Config, answers: LayaAnswers | null, signals: Record<string, boolean>, asked: Effort | null = null): Pick {
   const ids = config.work.options.map(o => o.id)
   const work = answers ? (ids[upOnTie(ids.map(id => answers.work[id] ?? 0), config.tieMargin)] ?? config.fallback.work) : config.fallback.work
   const level = answers ? upOnTie(answers.difficulty, config.tieMargin) : config.fallback.difficulty
@@ -255,6 +320,15 @@ export function choose(config: Config, answers: LayaAnswers | null, signals: Rec
       gear = floor.atLeast
       why.push(`${floor.name}: at least ${gearName(floor.atLeast)}`)
     }
+  }
+
+  const cap = EFFORTS.indexOf(MAX_UNASKED_EFFORT)
+  if (asked !== null && EFFORTS.indexOf(asked) > cap) {
+    gear = { ...gear, effort: asked }
+    why.push(`${asked}: asked for by the user`)
+  } else if (EFFORTS.indexOf(gear.effort) > cap) {
+    gear = { ...gear, effort: MAX_UNASKED_EFFORT }
+    why.push(`${MAX_UNASKED_EFFORT}: higher efforts only when the user asks`)
   }
   return { gear, work, level, why }
 }

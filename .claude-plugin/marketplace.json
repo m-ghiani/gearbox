@@ -10,7 +10,7 @@
       "name": "gearbox",
       "source": "./",
       "description": "Picks model and effort for each subagent with Laya, a local decision model, and shows every subagent in a pane with its model, effort, tokens and files. Observes by default (logs its pick and how the agent ended, /gearbox report sums it up); in apply mode it starts subagents on the model it picks",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "license": "MIT"
     }
   ]
